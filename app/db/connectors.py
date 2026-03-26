@@ -6,43 +6,100 @@ from app.config import settings
 class DuckDBConnector(DatabaseConnector):
     def __init__(self):
         import duckdb
-        self.conn = duckdb.connect(database=':memory:', read_only=False)
-        # Mount the local data path if provided
-        # For simplicity in this agent, we just use a memory db or let it read parquet/csv locally
-        
-    async def connect(self):
-        pass
+        self.conn = duckdb.connect(database=":memory:", read_only=False)
+        self._schema_cache: str | None = None
 
-    async def execute(self, sql: str, max_rows: int = 1000) -> Tuple[List[str], List[Dict[str, Any]], int]:
+    async def connect(self):
+        """Load all CSV/Parquet files from DUCKDB_DATA_PATH as DuckDB tables."""
+        import os, asyncio, duckdb
+
+        data_path = settings.DUCKDB_DATA_PATH
+        if not os.path.isdir(data_path):
+            return  # nothing to load
+
         loop = asyncio.get_event_loop()
+
+        def _load():
+            loaded = []
+            for fname in os.listdir(data_path):
+                fpath = os.path.join(data_path, fname)
+                table = os.path.splitext(fname)[0]   # "sales.csv" → table "sales"
+                try:
+                    if fname.endswith(".csv"):
+                        self.conn.execute(
+                            f"CREATE OR REPLACE TABLE \"{table}\" AS "
+                            f"SELECT * FROM read_csv_auto('{fpath}')"
+                        )
+                        loaded.append(table)
+                    elif fname.endswith(".parquet"):
+                        self.conn.execute(
+                            f"CREATE OR REPLACE TABLE \"{table}\" AS "
+                            f"SELECT * FROM read_parquet('{fpath}')"
+                        )
+                        loaded.append(table)
+                except Exception as exc:
+                    pass  # skip unreadable files
+            return loaded
+
+        await loop.run_in_executor(None, _load)
+
+    async def get_schema_context(self) -> str:
+        """Return CREATE TABLE-style schema string for every loaded table."""
+        if self._schema_cache:
+            return self._schema_cache
+
+        import asyncio
+        loop = asyncio.get_event_loop()
+
+        def _schema():
+            lines = []
+            tables = self.conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main'"
+            ).fetchall()
+            for (tname,) in tables:
+                cols = self.conn.execute(
+                    f"DESCRIBE \"{tname}\""
+                ).fetchall()
+                col_defs = ", ".join(
+                    f"{c[0]} {c[1]}" for c in cols
+                )
+                lines.append(f"CREATE TABLE {tname} ({col_defs});")
+            return " ".join(lines)
+
+        schema = await loop.run_in_executor(None, _schema)
+        self._schema_cache = schema
+        return schema
+
+    async def execute(self, sql: str, max_rows: int = 1000) -> tuple:
+        import asyncio
+        loop = asyncio.get_event_loop()
+
         def _exec():
-            # In DuckDB we can directly run
             rel = self.conn.sql(sql)
             if rel is None:
                 return [], [], 0
-            
             columns = rel.columns
-            # Fetch limited rows for preview
             df = rel.limit(max_rows).df()
             data = df.to_dict(orient="records")
-            
-            # To get total rows efficiently without re-evaluating, we could try a count
-            # For simplicity, we just return the fetched length if less than max_rows
-            total_rows = len(data) if len(data) < max_rows else max_rows # Placeholder
-            
+            total_rows = len(data) if len(data) < max_rows else max_rows
             return columns, data, total_rows
-            
+
         return await loop.run_in_executor(None, _exec)
 
     async def explain(self, sql: str) -> str:
+        import asyncio
         loop = asyncio.get_event_loop()
+
         def _explain():
             rel = self.conn.sql(f"EXPLAIN {sql}")
             return str(rel.fetchall())
+
         return await loop.run_in_executor(None, _explain)
 
     async def close(self):
         self.conn.close()
+
 
 class AsyncPGConnector(DatabaseConnector):
     def __init__(self):

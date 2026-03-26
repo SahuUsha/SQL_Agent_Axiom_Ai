@@ -8,7 +8,8 @@ router = APIRouter()
 
 @router.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "sql_query_agent"}
+    from app.config import settings
+    return {"status": "ok", "service": "sql_query_agent", "llm_provider": "grok" if getattr(settings, "XAI_API_KEY", "") else settings.LLM_PROVIDER}
 
 @router.post("/query", response_model=QueryResult)
 async def execute_query(req: QueryRequest):

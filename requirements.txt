@@ -4,6 +4,8 @@ sqlalchemy
 asyncpg
 aiomysql
 duckdb
+numpy
+pandas
 snowflake-connector-python
 google-cloud-bigquery
 sqlglot
@@ -17,3 +19,8 @@ pydantic-settings
 pytest
 pytest-asyncio
 httpx
+langchain-core
+langchain-groq
+langchain-openai
+langchain-community
+langchain-anthropic

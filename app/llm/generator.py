@@ -1,8 +1,11 @@
 from app.config import settings
 from app.core.exceptions import SQLGenerationError
-import anthropic
-import openai
 from typing import Optional
+
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatOllama
 
 def generate_prompt(task: str, schema: str, dialect: str, max_rows: int = 1000) -> str:
     return f"""You are a senior SQL analyst. Generate a single SQL SELECT query to answer the user's request.
@@ -21,36 +24,35 @@ Rules:
 
 async def _call_llm(prompt: str) -> str:
     provider = settings.LLM_PROVIDER.lower()
+
+    # Auto-select
+    if getattr(settings, "XAI_API_KEY", None) and provider != "ollama":
+        provider = "grok"
+    elif getattr(settings, "GROQ_API_KEY", None) and provider != "ollama":
+        provider = "groq"
+
+    messages = [
+        SystemMessage(content="You are an SQL generator. Only reply with the raw SQL code."),
+        HumanMessage(content=prompt)
+    ]
     
-    if provider == "groq":
-        import groq
-        client = groq.AsyncGroq(api_key=settings.GROQ_API_KEY)
-        response = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an SQL generator. Only reply with the raw SQL code."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0
-        )
-        return response.choices[0].message.content.strip().strip("```sql").strip("```").strip()
-        
-    elif provider == "ollama":
-        from openai import AsyncOpenAI
-        # Ollama API structure matches OpenAI locally
-        client = AsyncOpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-        response = await client.chat.completions.create(
-            model=settings.OLLAMA_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an SQL generator. Only reply with the raw SQL code."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0
-        )
-        return response.choices[0].message.content.strip().strip("```sql").strip("```").strip()
-        
-    else:
-        raise SQLGenerationError(f"Unsupported LLM Provider: {provider}")
+    try:
+        if provider == "groq":
+            llm = ChatGroq(api_key=settings.GROQ_API_KEY, model_name=settings.GROQ_MODEL, temperature=0.0)
+        elif provider == "grok" or getattr(settings, "XAI_API_KEY", None):
+            llm = ChatOpenAI(api_key=settings.XAI_API_KEY, base_url="https://api.x.ai/v1", model="grok-2-latest", temperature=0.0)
+        elif provider == "ollama":
+            llm = ChatOllama(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL, temperature=0.0)
+        elif provider == "mcp":
+            # MCP (Model Context Protocol)
+            llm = ChatOpenAI(api_key=settings.OPENAI_API_KEY, model_name="gpt-4", temperature=0.0)
+        else:
+            raise SQLGenerationError(f"Unsupported LLM Provider: {provider}")
+
+        response = await llm.ainvoke(messages)
+        return response.content.strip().strip("```sql").strip("`").strip("```").strip()
+    except Exception as e:
+        raise SQLGenerationError(f"LLM call failed: {e}")
 
 async def generate_sql(task: str, schema: str, dialect: str) -> str:
     prompt = generate_prompt(task, schema, dialect, settings.MAX_RESULT_ROWS)
