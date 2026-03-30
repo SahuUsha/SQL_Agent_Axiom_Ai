@@ -7,6 +7,7 @@ class DuckDBConnector(DatabaseConnector):
     def __init__(self):
         import duckdb
         self.conn = duckdb.connect(database=":memory:", read_only=False)
+        self.conn.execute("INSTALL httpfs; LOAD httpfs;")
         self._schema_cache: str | None = None
 
     async def connect(self):
@@ -14,6 +15,18 @@ class DuckDBConnector(DatabaseConnector):
         import os, asyncio, duckdb
 
         data_path = settings.DUCKDB_DATA_PATH
+        if data_path.startswith("http"):
+            # Single remote file mode
+            loop = asyncio.get_event_loop()
+            def _load_remote():
+                table = "data"
+                if data_path.endswith(".csv"):
+                    self.conn.execute(f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM read_csv_auto('{data_path}')")
+                elif data_path.endswith(".parquet"):
+                    self.conn.execute(f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM read_parquet('{data_path}')")
+            await loop.run_in_executor(None, _load_remote)
+            return
+
         if not os.path.isdir(data_path):
             return  # nothing to load
 
